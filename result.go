@@ -12,6 +12,7 @@ type Result struct {
 	User     string
 	Age      string
 	Comments uint64
+	IsJob    bool
 }
 
 func (self *Result) IsValid() bool {
@@ -29,5 +30,6 @@ func (self *Result) GetCSVFields() []string {
 		self.User,
 		self.Age,
 		fmt.Sprintf("%d", self.Comments),
+		fmt.Sprintf("%t", self.IsJob),
 	}
 }

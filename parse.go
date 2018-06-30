@@ -33,6 +33,8 @@ var (
 	ERR_PARSE_RESULT_END_COMMENTS_START_NOTFOUND  = fmt.Errorf("Parse Result_End Comments Start NOT Found!")
 	ERR_PARSE_RESULT_END_COMMENTS_NOTFOUND        = fmt.Errorf("Parse Result_End Comments NOT Found!") // we have to either find a suffix or none
 	ERR_PARSE_RESULT_END_COMMENTS_INVALID         = fmt.Errorf("Parse Result_End Comments Invalid!")
+	ERR_PARSE_RESULT_JOB_ID_NOTFOUND              = fmt.Errorf("Parse Result_End Job ID NOT Found!")
+	ERR_PARSE_RESULT_JOB_ID_INVALID               = fmt.Errorf("Parse Result_End Job ID Invalid!")
 )
 
 var (
@@ -42,6 +44,7 @@ var (
 	parser_result_start_prefix          = []byte(`<td align="right" valign="top" class="title"><span class="rank">`)
 	parser_result_start_id_upvote_start = []byte(`vote?id=`)
 	parser_result_start_id_upvote_end   = []byte(`&amp;how=up&amp;goto=news'><div class='votearrow' title='upvote'></div></a></center></td><td class="title"><a href="`)
+	parser_result_job_prefix            = []byte(`<td></td><td class="title"><a href="`)
 	parser_result_start_url_end         = []byte(`" class="storylink"`) // we can't close this, some links end with `rel="nofollow">`
 	parser_result_start_title_end       = []byte(`</a>`)                // we can't include span, ask posts don't include it, we also don't need to since there's no more interesting data on this line
 	// end
@@ -119,30 +122,40 @@ func Parse(
 			result = &Result{}
 			// trim prefix
 			line = line[len(parser_result_start_prefix):]
-			// split ID start
-			split := bytes.SplitAfterN(line, parser_result_start_id_upvote_start, 2)
-			if len(split) != 2 {
-				// ID split start NOT found
-				return nil, ERR_PARSE_RESULT_START_ID_START_NOTFOUND
+			// we have to check if this is a JOB posting first
+			// job posts do not have an ID on the first line, and do not contain upvotes
+			split := bytes.SplitAfterN(line, parser_result_job_prefix, 2)
+			if len(split) == 2 {
+				// this is a JOB!!!
+				result.IsJob = true
+				line = split[1]
 			}
-			// found the start of our ID
-			// discard the split prefix
-			line = split[1]
-			// split the end of our ID, until our URL
-			split = bytes.SplitAfterN(line, parser_result_start_id_upvote_end, 2)
-			if len(split) != 2 {
-				// ID split start NOT found
-				return nil, ERR_PARSE_RESULT_START_ID_END_NOTFOUND
+			if !result.IsJob {
+				// split ID start
+				split = bytes.SplitAfterN(line, parser_result_start_id_upvote_start, 2)
+				if len(split) != 2 {
+					// ID split start NOT found
+					return nil, ERR_PARSE_RESULT_START_ID_START_NOTFOUND
+				}
+				// found the start of our ID
+				// discard the split prefix
+				line = split[1]
+				// split the end of our ID, until our URL
+				split = bytes.SplitAfterN(line, parser_result_start_id_upvote_end, 2)
+				if len(split) != 2 {
+					// ID split start NOT found
+					return nil, ERR_PARSE_RESULT_START_ID_END_NOTFOUND
+				}
+				// found the end of our ID
+				// trim our id split suffix and validate our ID
+				id, err := strconv.ParseUint(string(split[0][:len(split[0])-len(parser_result_start_id_upvote_end)]), 10, 64)
+				if err != nil {
+					// return our own error
+					return nil, ERR_PARSE_RESULT_START_ID_INVALID
+				}
+				// set ID
+				result.ID = id
 			}
-			// found the end of our ID
-			// trim our id split suffix and validate our ID
-			id, err := strconv.ParseUint(string(split[0][:len(split[0])-len(parser_result_start_id_upvote_end)]), 10, 64)
-			if err != nil {
-				// return our own error
-				return nil, ERR_PARSE_RESULT_START_ID_INVALID
-			}
-			// set ID
-			result.ID = id
 			// parse URL end
 			line = split[1]
 			split = bytes.SplitAfterN(line, parser_result_start_url_end, 2)
@@ -172,59 +185,83 @@ func Parse(
 			// trim and set title
 			result.Title = string(split[0][:len(split[0])-len(parser_result_start_title_end)])
 			// we can discard the remainder of this line, there's no extra data within it
-		} else if bytes.HasPrefix(line, parser_result_end_prefix) {
+		} else if bytes.HasPrefix(line, parser_result_end_prefix) ||
+			(result.IsValid() && result.IsJob && bytes.HasPrefix(line, parser_result_age_prefix)) {
 			// RESULT ENDING LINE!!!!
 			if !result.IsValid() {
 				// our previous line WAS NOT a result!!!
 				// we need a result object to use!!!
 				return nil, ERR_RESULT_DOESNTEXIST
 			}
-			// trim prefix
-			line = line[len(parser_result_end_prefix):]
-			// split ending tag, points start
-			split := bytes.SplitAfterN(line, parser_result_closing_tag, 2)
-			if len(split) != 2 {
-				// title split start NOT found
-				return nil, ERR_PARSE_RESULT_END_TITLE_START_NOTFOUND
+			if !result.IsJob {
+				// this is NOT a job!
+				// trim prefix
+				line = line[len(parser_result_end_prefix):]
+				// split ending tag, points start
+				split := bytes.SplitAfterN(line, parser_result_closing_tag, 2)
+				if len(split) != 2 {
+					// title split start NOT found
+					return nil, ERR_PARSE_RESULT_END_TITLE_START_NOTFOUND
+				}
+				// found the start of our points
+				// discard the split prefix
+				line = split[1]
+				// split the end of our points until we reach our user
+				split = bytes.SplitAfterN(line, parser_result_user_start, 2)
+				if len(split) != 2 {
+					// ID split start NOT found
+					return nil, ERR_PARSE_RESULT_END_USER_START_NOTFOUND
+				}
+				// found our Points
+				// trim our points split suffix and validate our Points
+				points, err := strconv.ParseUint(string(split[0][:len(split[0])-len(parser_result_user_start)]), 10, 64)
+				if err != nil {
+					// return our own error
+					return nil, ERR_PARSE_RESULT_END_POINTS_INVALID
+				}
+				// set Points
+				result.Points = points
+				line = split[1]
+				// split ending quote, user ends here
+				split = bytes.SplitAfterN(line, parser_result_quote, 2)
+				if len(split) != 2 {
+					// split ending quote NOT found
+					return nil, ERR_PARSE_RESULT_END_USER_NOTFOUND
+				}
+				// found the end of our user
+				// set User
+				result.User = string(split[0][:len(split[0])-len(parser_result_quote)])
+				line = split[1]
+				// split and discard age prefix
+				split = bytes.SplitAfterN(line, parser_result_age_prefix, 2)
+				if len(split) != 2 {
+					// split NOT found
+					return nil, ERR_PARSE_RESULT_END_AGE_PREFIX_NOTFOUND
+				}
+				line = split[1]
+			} else {
+				// this is a JOB
+				// trim prefix
+				line = line[len(parser_result_age_prefix):]
+				// we have to get our ID since our first line does not contain it
+				split := bytes.SplitAfterN(line, parser_result_quote, 2)
+				if len(split) != 2 {
+					// split ending quote NOT found
+					return nil, ERR_PARSE_RESULT_JOB_ID_NOTFOUND
+				}
+				// found the end of our ID
+				// trim our id split suffix and validate our ID
+				id, err := strconv.ParseUint(string(split[0][:len(split[0])-len(parser_result_quote)]), 10, 64)
+				if err != nil {
+					// return our own error
+					return nil, ERR_PARSE_RESULT_JOB_ID_INVALID
+				}
+				// set ID
+				result.ID = id
+				line = split[1]
 			}
-			// found the start of our points
-			// discard the split prefix
-			line = split[1]
-			// split the end of our points until we reach our user
-			split = bytes.SplitAfterN(line, parser_result_user_start, 2)
-			if len(split) != 2 {
-				// ID split start NOT found
-				return nil, ERR_PARSE_RESULT_END_USER_START_NOTFOUND
-			}
-			// found our Points
-			// trim our points split suffix and validate our Points
-			points, err := strconv.ParseUint(string(split[0][:len(split[0])-len(parser_result_user_start)]), 10, 64)
-			if err != nil {
-				// return our own error
-				return nil, ERR_PARSE_RESULT_END_POINTS_INVALID
-			}
-			// set Points
-			result.Points = points
-			line = split[1]
-			// split ending quote, user ends here
-			split = bytes.SplitAfterN(line, parser_result_quote, 2)
-			if len(split) != 2 {
-				// split ending quote NOT found
-				return nil, ERR_PARSE_RESULT_END_USER_NOTFOUND
-			}
-			// found the end of our user
-			// set User
-			result.User = string(split[0][:len(split[0])-len(parser_result_quote)])
-			line = split[1]
-			// split and discard age prefix
-			split = bytes.SplitAfterN(line, parser_result_age_prefix, 2)
-			if len(split) != 2 {
-				// split NOT found
-				return nil, ERR_PARSE_RESULT_END_AGE_PREFIX_NOTFOUND
-			}
-			line = split[1]
 			// our userid is repeated, but we're going to ignore it and split on first closing tag
-			split = bytes.SplitAfterN(line, parser_result_closing_tag, 2)
+			split := bytes.SplitAfterN(line, parser_result_closing_tag, 2)
 			if len(split) != 2 {
 				// split NOT found
 				return nil, ERR_PARSE_RESULT_END_AGE_START_NOTFOUND
@@ -238,42 +275,45 @@ func Parse(
 			}
 			// set age
 			result.Age = string(bytes.ToLower(split[0][:len(split[0])-len(parser_result_age_suffix)]))
-			line = split[1]
-			// we have to find the comments now
-			// we're going to split on our comments prefix now
-			split = bytes.SplitAfterN(line, parser_result_comments_prefix, 2)
-			if len(split) != 2 {
-				// split NOT found
-				return nil, ERR_PARSE_RESULT_END_COMMENTS_PREFIX_NOTFOUND
-			}
-			line = split[1]
-			// our userid is repeated, but we're going to ignore it and split on first closing tag
-			split = bytes.SplitAfterN(line, parser_result_closing_tag, 2)
-			if len(split) != 2 {
-				// split NOT found
-				return nil, ERR_PARSE_RESULT_END_COMMENTS_START_NOTFOUND
-			}
-			line = split[1]
-			// we'll either have a prefix of `discuss` here for no comments
-			// or we'll have to split on &amp to get the amount of comments
-			if bytes.HasPrefix(line, parser_result_comments_none) {
-				// no comments!
-				// this is fine
-			} else {
-				// split comments suffix
-				split = bytes.SplitAfterN(line, parser_result_comments_suffix, 2)
+			if !result.IsJob {
+				// jobs do NOT contains comments!
+				line = split[1]
+				// we have to find the comments now
+				// we're going to split on our comments prefix now
+				split = bytes.SplitAfterN(line, parser_result_comments_prefix, 2)
 				if len(split) != 2 {
 					// split NOT found
-					return nil, ERR_PARSE_RESULT_END_COMMENTS_NOTFOUND
+					return nil, ERR_PARSE_RESULT_END_COMMENTS_PREFIX_NOTFOUND
 				}
-				// validate comments
-				comments, err := strconv.ParseUint(string(split[0][:len(split[0])-len(parser_result_comments_suffix)]), 10, 64)
-				if err != nil {
-					// return our own error
-					return nil, ERR_PARSE_RESULT_END_COMMENTS_INVALID
+				line = split[1]
+				// our userid is repeated, but we're going to ignore it and split on first closing tag
+				split = bytes.SplitAfterN(line, parser_result_closing_tag, 2)
+				if len(split) != 2 {
+					// split NOT found
+					return nil, ERR_PARSE_RESULT_END_COMMENTS_START_NOTFOUND
 				}
-				// we can discard the remainder of this line
-				result.Comments = comments
+				line = split[1]
+				// we'll either have a prefix of `discuss` here for no comments
+				// or we'll have to split on &amp to get the amount of comments
+				if bytes.HasPrefix(line, parser_result_comments_none) {
+					// no comments!
+					// this is fine
+				} else {
+					// split comments suffix
+					split = bytes.SplitAfterN(line, parser_result_comments_suffix, 2)
+					if len(split) != 2 {
+						// split NOT found
+						return nil, ERR_PARSE_RESULT_END_COMMENTS_NOTFOUND
+					}
+					// validate comments
+					comments, err := strconv.ParseUint(string(split[0][:len(split[0])-len(parser_result_comments_suffix)]), 10, 64)
+					if err != nil {
+						// return our own error
+						return nil, ERR_PARSE_RESULT_END_COMMENTS_INVALID
+					}
+					// we can discard the remainder of this line
+					result.Comments = comments
+				}
 			}
 			// append result
 			results = append(results, result)
